@@ -196,7 +196,7 @@ class Watlow():
         request += dataChk
 
         return request
-
+    
     def _validateResponse(self, bytesResponse):
         '''
         Compares check bytes received in response to those calculated.
@@ -235,7 +235,7 @@ class Watlow():
             return output
         else:
             # Case where response data value is an int used to represent a state defined
-            # in the manual (e.g. param 8003, heat algorithm, where 62 means 'PID')
+            # in the manual (e.g. param 8003, heat algorithm, where 62 means 'Off')
             # from a read request
             # Hex byte 7: '0a', Hex bytes 15, 16: 0F, 01
             if bytesResponse[6] == 10 and bytesResponse[-6] == 15 and bytesResponse[-5] == 1:
@@ -249,8 +249,13 @@ class Watlow():
                 ieee_754 = hexlify(bytesResponse[-6:-2])
                 output['data'] = struct.unpack('>f', unhexlify(ieee_754))[0]
                 output['param'] = self._byteDataParamToInt(bytesResponse[10:12])
+            # Case of 21003, where the response is a read request
+            elif bytesResponse[6] == 9 and bytesResponse[-5] == 3:
+                data = bytesResponse[-4:-2]
+                output['param'] = self._byteDataParamToInt(bytesResponse[11:13])
+                output['data'] = int.from_bytes(data, byteorder='big')
             # Case where response data value is an integer from a set param
-            # request (e.g. param 8003, heat algorithm, where 62 means 'PID')
+            # request (e.g. param 8003, heat algorithm, where 62 means 'Off')
             # Hex byte 7: '09'
             elif bytesResponse[6] == 9:
                 data = bytesResponse[-4:-2]
@@ -263,6 +268,12 @@ class Watlow():
                 ieee_754 = bytesResponse[-6:-2]
                 output['param'] = self._byteDataParamToInt(bytesResponse[11:13])
                 output['data'] = struct.unpack('>f', ieee_754)[0]
+            # Case where data is a single byte integer
+            # (e.g. 21004, where step type parameter "minutes" is returned)
+            # Hex byte 7: '08'
+            elif bytesResponse[6] == 8:
+                output['param'] = self._byteDataParamToInt(bytesResponse[11:13])
+                output['data'] = bytesResponse[15]
             # Other cases, such as response from trying to write a read-only parameter:
             else:
                 output['error'] = Exception('Received a message that could not be parsed from address {0}'.format(self.address))
