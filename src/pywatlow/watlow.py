@@ -197,6 +197,45 @@ class Watlow():
 
         return request
     
+    def _buildSingleIntWriteRequest(self, dataParam, value, data_type, instance='01'):
+        '''
+        Separate function (for now) to experiment with write requests for single integer data byte message
+
+        (Needs work. Currently, it's just a copy of _buildWriteRequest)
+        '''
+        BACnetPreamble = '55ff'
+        requestParam = '05'
+        zone = self._buildZone(self.address)
+        dataParam = self._intDataParamToHex(dataParam)
+        if data_type == float:
+            additionalHeader = '00000a'
+            hexData = '0104' + dataParam + instance + '08'
+            value = struct.pack('>f', float(value))
+        elif data_type == int:
+            additionalHeader = '030009'
+            hexData = '0104' + dataParam + instance + '0f01'
+            value = value.to_bytes(2, 'big')
+
+        # Request Header String:
+        hexHeader = BACnetPreamble + requestParam + zone + additionalHeader
+        # Convert input strings to bytes:
+        hexHeader = unhexlify(hexHeader)
+
+        # Data portion of request (here the set point value is appended)
+        hexData = unhexlify(hexData) + value
+
+        # Calculate check bytes:
+        headerChk = self._headerCheckByte(hexHeader)
+        dataChk = self._dataCheckByte(hexData)
+
+        # Assemble request byte array:
+        request = bytearray(hexHeader)
+        request += bytearray(headerChk)
+        request += bytearray(hexData)
+        request += dataChk
+
+        return request
+
     def _validateResponse(self, bytesResponse):
         '''
         Compares check bytes received in response to those calculated.
