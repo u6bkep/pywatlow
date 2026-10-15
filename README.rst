@@ -59,7 +59,7 @@ Overview
 
 .. end-badges
 
-A Python 3 driver for the Watlow EZ-Zone PM temperature controller standard bus protocol.
+A Python 3 driver for the Watlow EZ-ZONE PM temperature controller standard bus protocol.
 This driver allows the user to access each of the parameters outlined in the Watlow
 `user manual <https://www.watlow.com/-/media/documents/user-manuals/pm-pid-1.ashx>`_
 with just a few functions.
@@ -76,6 +76,13 @@ Installation
 You can also install the in-development version with::
 
     pip install https://github.com/BrendanSweeny/pywatlow/archive/master.zip
+
+This fork (https://github.com/u6bkep/pywatlow) carries the 0.2 protocol
+overhaul: enum writes encoded as Watlow's own software encodes them,
+length-driven reply reading, decoded controller exceptions, and a pure codec
+module. See the changelog. Install it with::
+
+    pip install https://github.com/u6bkep/pywatlow/archive/master.zip
 
 
 Documentation

@@ -1,107 +1,154 @@
 Watlow Messaging Structure
 ==========================
 
-The following is an incomplete understanding of the messaging structure that
-the Watlow temperature controllers use. Enough of the structure is understood
-for the driver to be functional, but the function of many of the bytes is unknown
-to the author(s).
+Watlow "Standard Bus" is a BACnet MS/TP variant carried over EIA-485 (38400
+baud, 8N1 by default). The layout below is taken from Watlow's own
+``WatbusAppLibrary`` (the managed half of the EZ-ZONE Configurator), so the
+meaning of every byte is known. Earlier pywatlow releases were built from
+captured traffic alone and got two details wrong (see `Differences from
+pywatlow 0.1.x`_).
 
-General Message Structure:
+Frame
+-----
 
-* BACnet MS/TP protocol
-* First two bytes of any message make up the preamble, and are always: 55 FF
-* Byte 3 seems to define the type of message (read/response)
-* Byte 4 of the request defines the zone (internal Watlow address)
-* The zone appears in byte 5 of the response
-* Byte 7 appears to define the type of request
-* Byte 8 is the header check byte (more info at `reverseengineering.stackexchange.com <https://reverseengineering.stackexchange.com/questions/8303/rs-485-checksum-reverse-engineering-watlow-ez-zone-pm>`_)
-* Immediately following the parameter bytes is the instance. I have yet to encounter a situation where this is not 01
-* The final two bytes of any message are the data check bytes (more info at `reverseengineering.stackexchange.com <https://reverseengineering.stackexchange.com/questions/8303/rs-485-checksum-reverse-engineering-watlow-ez-zone-pm>`_)
+Requests and replies share one frame layout::
 
+    55 FF               preamble
+    <type>              05 = request expecting a reply, 06 = reply
+    <dst>               destination: zone = controller address + 15
+                        (address 1 -> 10, address 16 -> 1F); the bus master is 00
+    <src>               source address (00 from the master, the zone from the controller)
+    <len hi> <len lo>   ADU length, big-endian
+    <hdr check>         CRC-8 over bytes 2..6 (not the preamble); see
+                        ``protocol.header_check_byte`` and the write-up at
+                        https://reverseengineering.stackexchange.com/questions/8303
+    <adu ...>           application data unit, <len> bytes
+    <data check>        CRC-16 (poly 0x1021 reflected, init FFFF, xor-out FFFF)
+                        over the ADU, sent little-endian
 
-How to read the example message tables:
+The length field is what makes a frame readable without knowing in advance
+what it carries: read 8 bytes, check the header, then read ``len + 2`` more.
 
-* Addr.: The address used in the request and response
-* Param: The parameter being read/set
-* Process Val.: The value represented in the "Data" column of the response/request
-* The message begins with the column labeled "Preamble" and continues to the right
-* Sometimes the byte number is not the same in the response as the request (e.g. Zone), hence the "-"
+ADU
+---
 
-Read Requests
--------------
+::
 
-* Read requests seem to be 16 bytes long no matter the data type
-* Byte 7 is 06 for read requests
-* Bytes 12 and 13 represent the parameter to be read
-* Byte 14 is the instance, generally 01
+    request    : 01 <function> ...            01 = UnicastRequest
+    reply      : 02 <function> ...            02 = UnicastResponse
+    exception  : <type> <code>                <code> is 128..136, in the function slot
 
-Where the response is a float:
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ReadSingle  (03) request : 01 03 01 <class> <member> <instance>
+                     reply   : 02 03 01 <class> <member> <instance> <repr> <value..>
+    WriteSingle (04) request : 01 04 <class> <member> <instance> <repr> <value..>
+                     reply   : 02 04 <class> <member> <instance> <repr> <value..>
 
-* Request is 16 bytes long
-* Response is 21 bytes long
-* Response types appear to be defined by bytes 7
-* Note: The process value for 4001 is ~2500 in these examples because no probe is connected
+A parameter id from the manual, ``CCMMM``, is split in decimal into the class
+(leading one or two digits) and member (last three): 4001 is class 4 member
+1, 26029 is class 26 member 29. The instance is the channel, 1 on single-loop
+controllers.
+
+Data representations
+--------------------
+
+``<repr>`` says how ``<value..>`` is encoded:
+
+===== ========== ================================= =================================
+code  name       in a write                        in a reply
+===== ========== ================================= =================================
+1     UByte      1 byte                            1 byte
+2     Byte       1 byte, signed                    1 byte, signed
+3     UWord      2 bytes big-endian                2 bytes big-endian
+4     Word       2 bytes big-endian, signed        2 bytes big-endian, signed
+5     ULong      4 bytes big-endian                4 bytes big-endian
+6     Long       4 bytes big-endian, signed        4 bytes big-endian, signed
+7     Enum       ``01 <v>`` (byte length, value)   ``<n> <v>...`` (entry count, n values)
+8     Float      IEEE-754 big-endian               IEEE-754 big-endian
+9     String     ``<len> <chars> 00``              ``<len> <chars> 00`` (len includes NUL)
+10    List       ``02 <hi> <lo>``                  ``<n> <hi> <lo>...`` (n 2-byte entries)
+15    WideEnum   ``02 <hi> <lo>``                  ``<n> <hi> <lo>...`` (n 2-byte entries)
+===== ========== ================================= =================================
+
+Note the asymmetry for enumerations: the byte after the representation is the
+value's byte length in a write and the number of entries in a reply, so a
+wide enum goes out as ``0F 02 hi lo`` and comes back as ``0F 01 hi lo``.
+
+Every enumerated parameter in the PM manual ("uint" in its tables: heat
+algorithm, units, ramp action, sensor type...) is a WideEnum. Floating point
+parameters are Float.
+
+Exceptions
+----------
+
+Instead of a reply the controller may answer with a two-byte ADU,
+``<type> <code>``. The codes (``WatbusEnumerations``):
+
+===== =====================
+128   UnsupportedFunction
+129   UnsupportedClass
+130   UnsupportedSubcode
+131   UnsupportedMember
+132   UnsupportedInstance
+133   UnsupportedAttribute
+134   DataOutOfRange
+135   CannotProcess
+136   IllegalAccess
+===== =====================
+
+Captured examples (all 12-byte frames):
+
+* ``55 FF 06 00 11 00 02 17 02 80 FF B8`` -- writing the read-only process
+  value (4001) at address 2: UnsupportedFunction
+* ``55 FF 06 00 10 00 02 8F 02 86 C9 DD`` -- writing Ramp Action (7014) = 1647
+  to an EZ-ZONE PM4 that does not offer that choice: DataOutOfRange
+* ``55 FF 06 00 10 00 02 8F 02 85 52 EF`` -- CannotProcess
+* ``55 FF 06 00 10 00 02 8F 02 83 64 8A`` -- UnsupportedMember
+
+Differences from pywatlow 0.1.x
+--------------------------------
+
+* **Enum writes** were sent as ``0F 01 hi lo``, the reply encoding, from bus
+  address 03. Watlow's software sends ``0F 02 hi lo`` from address 00, and that
+  is what this version sends. (The author's PM3 did acknowledge the old form,
+  so some firmware tolerates it; the configurator's form is the one Watlow
+  ships, and an EZ-ZONE PM4 has been verified to accept it.)
+* **Replies were read by a guessed fixed length** (19, 20 or 21 bytes picked
+  from the data type the caller passed). A 12-byte exception reply therefore
+  looked like a timeout, and a wrong `data_type` left bytes in the port for
+  the next exchange. Replies are now read by the length in their header, and
+  exceptions are decoded.
+* **Data types are no longer guessed from the frame length.** The reply's
+  representation byte is decoded, so any representation can be read and the
+  caller need not know the type in advance.
+
+Captured examples
+-----------------
+
+The tables below are traffic the original author captured from a PM3. Byte
+labels follow the layout above. The integer-write *requests* use the 0.1.x
+``0F 01`` form, which that controller acknowledged; the replies are as any
+controller sends them.
+
+Read requests, float reply:
 
 .. csv-table:: Example Messages
   :file: messages_read_float.csv
   :header-rows: 1
 
-Where the response is an integer:
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-* Request is 16 bytes long
-* Response is 20 bytes long
+Read requests, wide-enum reply:
 
 .. csv-table:: Example Messages
   :file: messages_read_int.csv
   :header-rows: 1
 
-Set Requests
-------------
-
-* Bytes 11 and 12 represent the parameter to be set
-* Byte 13 is the instance, generally 01
-
-Where the value/response is a float
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-* Request is 20 bytes long
-* Response is 20 bytes long
-* Byte 7 is 0A when the process value is a float
-* When the process value is a float, the byte preceding the data (14) is 08
+Write requests, float:
 
 .. csv-table:: Example Messages
   :file: messages_set_float.csv
   :header-rows: 1
 
-Where the value/response is an integer:
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-* Request is 19 bytes long
-* Response is 19 bytes long
-* Byte 7 is 09 when the process value is an integer
-* When the process value is an integer, the two bytes preceeding the data (14, 15) are 0F 01
+Write requests, wide enum (0.1.x request encoding):
 
 .. csv-table:: Example Messages
   :file: messages_set_int.csv
   :header-rows: 1
-
-Errors
-^^^^^^
-
-Currently, it is unclear exactly what these responses mean, or what the structure of an error message is, but the following are possibly errors:
-
-This is likely an access denied error response received when trying to write a
-read only parameter (4001, 100 degrees, address 2):
-
-* `55 FF 06 00 11 00 02 17 02 80 FF B8`
-
-Other possible errors that have been received:
-
-* `55 FF 06 00 10 00 02 8F 02 85 52 EF`
-* `55 FF 06 00 10 00 02 8F 02 86 C9 DD`
-* `55 FF 06 00 10 00 02 8F 02 83 64 8A`
-* `55 FF 06 00 10 00 02 8F 02 80 FF B8`
-* `55 FF 06 00 10 00 05 73 02 05 08 03 00 02 5B`
-* `55 FF 06 00 10 00 05 73 02 05 01 08 00 B4 23`

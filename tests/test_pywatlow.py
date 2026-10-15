@@ -1,12 +1,20 @@
-
 from binascii import unhexlify
 
+import pytest
+
+from pywatlow import protocol
 from pywatlow.cli import main
+from pywatlow.protocol import ExceptionCode
+from pywatlow.protocol import InvalidResponse
+from pywatlow.protocol import NoResponse
+from pywatlow.protocol import ProtocolError
+from pywatlow.protocol import Repr
+from pywatlow.protocol import WatlowException
 from pywatlow.watlow import Watlow
 
 
 def test_main():
-    main([]) == 0
+    assert main([]) == 0
 
 
 def test_watlow():
@@ -14,21 +22,12 @@ def test_watlow():
     assert watlow.address == 1
 
 
-class TestWatlow:
+class TestCheckBytes:
     '''
-    Test suite for the Watlow class
-    * Each command was verified with a response from Watlow device
-    * Each response was a real response from a Watlow device
+    Every frame below was exchanged with a real controller.
     '''
 
-    def test_dataCheckByte(self):
-        '''
-        Test that the correct check byte is calculated from the data portion
-        of the hex command
-
-        _dataCheckByte is the only function scored in this test
-        '''
-        test_watlow_address1 = Watlow(serial=None)
+    def test_data_check_bytes(self):
         test_data = {
             # Request, Address 1, '4001'
             '55ff0510000006e8010301040101e399': b'\xe3\x99',
@@ -40,282 +39,355 @@ class TestWatlow:
             '55FF060010000B8802030104010108468F3638DD0E': b'\xdd\x0e',
             '55ff060010000b8802030104010108468f3abe4346': b'\x43\x46',
             '55ff060011000b1002030104010108468f393a07ae': b'\x07\xae',
-            '55ff060011000b100203010701010842960000d3b0': b'\xd3\xb0'
+            '55ff060011000b100203010701010842960000d3b0': b'\xd3\xb0',
+            # Exception reply captured from an EZ-ZONE PM4 (DataOutOfRange)
+            '55ff06001000028f0286c9dd': b'\xc9\xdd',
         }
+        for hex_frame, expected in test_data.items():
+            frame = unhexlify(hex_frame)
+            assert protocol.data_check_bytes(frame[8:-2]) == expected, hex_frame
 
-        for hexCommand in test_data:
-            # Assert that the key passed to _dataCheckByte results in the
-            # corresponding test_data value:
-            dataCheckByte = test_watlow_address1._dataCheckByte(unhexlify(hexCommand)[8:-2])
-            assert dataCheckByte == test_data[hexCommand], hexCommand
-            # Assert that the check byte length is equal to two:
-            assert len(dataCheckByte) == 2, hexCommand
-            # Assert that the result is an instance of type 'bytes'
-            assert isinstance(dataCheckByte, bytes), hexCommand
-
-    def test_headerCheckByte(self):
-        '''
-        Tests that the correct check byte is calculated from the header
-        portion of the hex command
-
-        Watlow zone/address is the only parameter changed in the header by users
-
-        _headerCheckByte is the only function scored by this test
-        '''
-        test_watlow_address1 = Watlow(serial=None)
+    def test_header_check_byte(self):
         test_data = {
-            # Request, Address 1, '4001'
-            '55ff0510000006e8010301040101e399': b'\xe8',
-            # Request, Address 2, '4001'
-            '55ff051100000661010301040101e399': b'\x61',
-            # Request, Address 2, '7001'
-            '55ff0511000006610103010701018776': b'\x61',
-            # Request, Address 16, '7001'
-            '55ff051f000006160103010701018776': b'\x16',
-            # Responses (not necessarily from requests above)
-            # Not necessary for function to calculate below correctly in practice
-            '55FF060010000B8802030104010108468F3638DD0E': b'\x88',
-            '55ff060010000b8802030104010108468f3abe4346': b'\x88',
-            '55ff060011000b1002030104010108468f3c3c89b5': b'\x10',
-            '55ff060011000b1002030104010108468f393a07ae': b'\x10'
+            '55ff0510000006e8010301040101e399': 0xe8,  # Request, Address 1
+            '55ff051100000661010301040101e399': 0x61,  # Request, Address 2
+            '55ff051f000006160103010701018776': 0x16,  # Request, Address 16
+            '55FF060010000B8802030104010108468F3638DD0E': 0x88,
+            '55ff060011000b1002030104010108468f3c3c89b5': 0x10,
+            '55ff06001000028f0286c9dd': 0x8f,
         }
+        for hex_frame, expected in test_data.items():
+            assert protocol.header_check_byte(unhexlify(hex_frame)[:7]) == expected, hex_frame
 
-        # Address 1 Tests:
-        for hexCommand in test_data:
-            # Assert that the key passed to _headerCheckByte results in the
-            # corresponding test_data value:
-            headerCheckByte = test_watlow_address1._headerCheckByte(unhexlify(hexCommand)[0:7])
-            assert headerCheckByte == test_data[hexCommand]
-            # Assert that the check byte length is equal to one:
-            assert len(headerCheckByte) == 1, hexCommand
-            # Assert that the result is an instance of type 'bytes'
-            assert isinstance(headerCheckByte, bytes), hexCommand
+    def test_header_check_byte_needs_seven_bytes(self):
+        with pytest.raises(ProtocolError):
+            protocol.header_check_byte(b'\x55\xff\x05')
 
-    def test_buildReadRequest(self):
+
+class TestParameterIds:
+
+    @pytest.mark.parametrize('param, cls, member', [
+        (4005, 4, 5), (4007, 4, 7), (4001, 4, 1), (7001, 7, 1), (8003, 8, 3),
+        (7017, 7, 17), (4042, 4, 42), (26029, 26, 29), (26026, 26, 26),
+        (26030, 26, 30), (34005, 34, 5), (34029, 34, 29), (6001, 6, 1),
+    ])
+    def test_split_and_join(self, param, cls, member):
+        assert protocol.split_param(param) == (cls, member)
+        assert protocol.split_param(str(param)) == (cls, member)
+        assert protocol.join_param(cls, member) == param
+
+    def test_split_rejects_out_of_range(self):
+        with pytest.raises(ProtocolError):
+            protocol.split_param(100000)
+        with pytest.raises(ProtocolError):
+            protocol.split_param(4999)  # member 999 does not fit a byte
+
+
+class TestRequests:
+
+    @pytest.mark.parametrize('param, address, instance, expected', [
+        # Verified against a real controller by the original author.
+        ('4001', 1, '01', '55ff0510000006e8010301040101e399'),  # Process Value
+        ('4002', 1, '01', '55ff0510000006e80103010402018bb3'),
+        ('7001', 1, '01', '55ff0510000006e80103010701018776'),  # Set point
+        ('4001', 2, '01', '55ff051100000661010301040101e399'),
+        ('7001', 2, '01', '55ff0511000006610103010701018776'),
+        ('4001', 11, '01', '55ff051a000006bd010301040101e399'),
+        ('7001', 11, '01', '55ff051a000006bd0103010701018776'),
+        ('4001', 16, '01', '55ff051f00000616010301040101e399'),
+        ('7001', 16, '01', '55ff051f000006160103010701018776'),
+        (4001, 2, 1, '55ff051100000661010301040101e399'),
+        (4005, 1, '01', '55FF0510000006E801030104050183FE'),  # Sensor Type
+        (4042, 1, '01', '55FF0510000006E8010301042A01785E'),  # Units
+        (4012, 1, '01', '55FF0510000006E8010301040C019B29'),  # Calibration offset
+        (34005, 1, '01', '55FF0510000006E8010301220501612B'),  # Linearization function
+        (26029, 1, '01', '55FF0510000006E80103011A1D015C30'),  # Altitude Units
+        (8003, 1, '01', '55FF0510000006E8010301080301F00F'),  # Heat Algorithm
+        (6001, 1, '01', '55FF0510000006E80103010601015B2C'),  # Digital I/O Direction
+    ])
+    def test_read_request(self, param, address, instance, expected):
+        assert protocol.build_read_request(address, param, instance) == unhexlify(expected)
+
+    @pytest.mark.parametrize('param, value, address, instance, expected', [
+        # Verified against a real controller by the original author.
+        (7001, 81, 1, '01', '55ff051000000aec01040701010842a20000c4b8'),
+        ('7001', 81.0, 1, '01', '55ff051000000aec01040701010842a20000c4b8'),
+        (7001, 78.5, 1, '01', '55ff051000000aec010407010108429d0000ad74'),
+        (7001, 80, 2, '01', '55FF051100000A6501040701010842A000007C0D'),
+        (7001, 78.5, 16, '01', '55ff051f00000a12010407010108429d0000ad74'),
+        (4016, 20.0, 2, '01', '55FF051100000A6501040410010841A000007D88'),  # Scale High
+        (4018, 9999.0, 2, '01', '55FF051100000A65010404120108461C3C0004D8'),  # Range High
+        (4014, 0.5, 2, '01', '55FF051100000A650104040E01083F0000004540'),  # Filter
+        (26030, 14.7, 2, '01', '55FF051100000A6501041A1E0108416B3333C7D9'),  # Barometric Pressure
+    ])
+    def test_write_float_request(self, param, value, address, instance, expected):
+        request = protocol.build_write_request(address, param, float, value, instance)
+        assert request == unhexlify(expected)
+
+    def test_write_wide_enum_request(self):
         '''
-        Tests that read requests are built properly based on the input dataParam
-
-        _buildReadRequest is also dependent on _headerCheckByte, _dataCheckByte,
-        and _intDataParamToHex
+        The configurator writes a wide enum as ``0F 02 <hi> <lo>``: the byte
+        after the representation is the value's byte length. pywatlow 0.1.x
+        sent the reply-style entry count (``0F 01``) instead, from the bus
+        master address 03 rather than 00.
         '''
-        test_data = [
-            # Test of form (dataParam, address, instance, request)
-            ('4001', 1, '01', '55ff0510000006e8010301040101e399'),  # Process Value
-            ('4002', 1, '01', '55ff0510000006e80103010402018bb3'),  # Set point
-            ('7001', 1, '01', '55ff0510000006e80103010701018776'),
-            ('4001', 2, '01', '55ff051100000661010301040101e399'),
-            ('4002', 2, '01', '55ff0511000006610103010402018bb3'),
-            ('7001', 2, '01', '55ff0511000006610103010701018776'),
-            ('4001', 11, '01', '55ff051a000006bd010301040101e399'),
-            ('4002', 11, '01', '55ff051a000006bd0103010402018bb3'),
-            ('7001', 11, '01', '55ff051a000006bd0103010701018776'),
-            ('4001', 16, '01', '55ff051f00000616010301040101e399'),
-            ('4002', 16, '01', '55ff051f000006160103010402018bb3'),
-            ('7001', 16, '01', '55ff051f000006160103010701018776'),
-            (4001, 2, '01', '55ff051100000661010301040101e399'),
-            (4002, 2, '01', '55ff0511000006610103010402018bb3'),
-            (7001, 2, '01', '55ff0511000006610103010701018776'),
-            (4005, 1, '01', '55FF0510000006E801030104050183FE'),  # Sensor Type
-            (4007, 1, '01', '55FF0510000006E801030104070133CD'),  # RTD Leads
-            (4042, 1, '01', '55FF0510000006E8010301042A01785E'),  # Units
-            (4015, 1, '01', '55FF0510000006E8010301040F01F303'),  # Scale Low
-            (4016, 1, '01', '55FF0510000006E8010301041001AA15'),  # Scale High
-            (4017, 1, '01', '55FF0510000006E8010301041101720C'),  # Range Low
-            (4018, 1, '01', '55FF0510000006E80103010412011A26'),  # Range High
-            (4030, 1, '01', '55FF0510000006E8010301041E01BA8F'),  # Process error enable
-            (4031, 1, '01', '55FF0510000006E8010301041F016296'),  # Process error low value
-            (4037, 1, '01', '55FF0510000006E8010301042501B0DD'),  # Resistance Range of thermistor
-            (4014, 1, '01', '55FF0510000006E8010301040E012B1A'),  # Filter
-            (4028, 1, '01', '55FF0510000006E8010301041C010ABC'),  # Input Error Latching
-            (4020, 1, '01', '55FF0510000006E8010301041401CA72'),  # Display precision
-            (4012, 1, '01', '55FF0510000006E8010301040C019B29'),  # Calibration offset
-            (34005, 1, '01', '55FF0510000006E8010301220501612B'),  # Linearization function
-            (34029, 1, '01', '55FF0510000006E8010301221D013070'),  # Linearization Units
-            (34008, 1, '01', '55FF0510000006E8010301220801199B'),  # Linearization input point 1
-            (34018, 1, '01', '55FF0510000006E8010301221201F8F3'),  # Linearization output point 1
-            (26021, 1, '01', '55FF0510000006E80103011A15019CFE'),  # Process Value function
-            (26028, 1, '01', '55FF0510000006E80103011A1C018429'),  # Process Value Pressure Units
-            (26029, 1, '01', '55FF0510000006E80103011A1D015C30'),  # Altitude Units
-            (26030, 1, '01', '55FF0510000006E80103011A1E01341A'),  # Barometric Pressure
-            (26026, 1, '01', '55FF0510000006E80103011A1A01547D'),  # Filter
-            (8003, 1, '01', '55FF0510000006E8010301080301F00F'),  # Heat Algorithm
-            (6001, 1, '01', '55FF0510000006E80103010601015B2C'),  # Digital I/O Direction
-        ]
+        # Ramp Action (7014) = 1647 at address 1. Independently derived vector
+        # (Raven furnace controller codec, verified against the PM4).
+        request = protocol.build_write_request(1, 7014, int, 1647, 1)
+        assert request[:7] == unhexlify('55ff05100000' + '09')
+        assert request[7] == protocol.header_check_byte(request[:7])
+        assert request[8:17] == unhexlify('0104070e010f02066f')
+        assert request[17:] == protocol.data_check_bytes(request[8:17])
+        assert len(request) == 19
 
-        for test in test_data:
-            readRequest = Watlow(serial=None, address=test[1])._buildReadRequest(dataParam=test[0], instance=test[2])
-            assert readRequest == unhexlify(test[3]), "param: {0}, addr: {1}, instance: {2} request: {3}".format(*test)
+    @pytest.mark.parametrize('param, value, address, adu', [
+        # ADUs of the original author's int-write vectors, re-encoded with the
+        # configurator's count byte.
+        (8003, 71, 1, '01040803010f020047'),  # Heat Algorithm = PID
+        (8003, 62, 1, '01040803010f02003e'),
+        (4005, 95, 2, '01040405010f02005f'),  # Sensor Type
+        (4042, 75, 2, '0104042a010f02004b'),  # Units
+        (4037, 1449, 2, '01040425010f0205a9'),  # Thermistor resistance range
+        (34029, 1539, 2, '0104221d010f020603'),  # Linearization Units
+        (26028, 1671, 2, '01041a1c010f020687'),  # Pressure Units
+    ])
+    def test_write_wide_enum_adu(self, param, value, address, adu):
+        request = protocol.build_write_request(address, param, int, value)
+        assert request[3] == address + 15
+        assert request[4] == protocol.MASTER_ADDRESS
+        assert request[5:7] == b'\x00\x09'
+        assert request[8:-2] == unhexlify(adu)
 
-    def test_intDataParamToHex(self):
-        '''
-        Tests that the integer representing the data parameters are formatted
-        to hexidecimal properly for the assembled messages.
-        '''
-        test_data = [
-            # Test of form: dataParam, two byte hex representation
-            (4005, '0405'),
-            (4007, '0407'),
-            (4001, '0401'),
-            (7001, '0701'),
-            (8003, '0803'),
-            (26029, '1a1d'),
-            (26026, '1a1a'),
-            (26030, '1a1e')
-        ]
+    def test_write_other_representations(self):
+        assert protocol.encode_value(Repr.ENUM, 71) == b'\x01\x47'
+        assert protocol.encode_value(Repr.WIDE_ENUM, 1647) == b'\x02\x06\x6f'
+        assert protocol.encode_value(Repr.LIST, 300) == b'\x02\x01\x2c'
+        assert protocol.encode_value(Repr.UBYTE, 200) == b'\xc8'
+        assert protocol.encode_value(Repr.BYTE, -2) == b'\xfe'
+        assert protocol.encode_value(Repr.UWORD, 0x1234) == b'\x12\x34'
+        assert protocol.encode_value(Repr.WORD, -1) == b'\xff\xff'
+        assert protocol.encode_value(Repr.ULONG, 0x01020304) == b'\x01\x02\x03\x04'
+        assert protocol.encode_value(Repr.LONG, -2) == b'\xff\xff\xff\xfe'
+        assert protocol.encode_value(Repr.FLOAT, 350.0) == b'\x43\xaf\x00\x00'
+        assert protocol.encode_value(Repr.STRING, 'AB') == b'\x02AB\x00'
 
-        for test in test_data:
-            generatedDataParam = Watlow()._intDataParamToHex(test[0])
-            assert generatedDataParam == test[1]
+    def test_write_rejects_bad_values(self):
+        with pytest.raises(ProtocolError):
+            protocol.encode_value(Repr.UBYTE, 300)
+        with pytest.raises(ProtocolError):
+            protocol.encode_value(Repr.WIDE_ENUM, -1)
+        with pytest.raises(ProtocolError):
+            protocol.encode_value(Repr.EVENT, 1)
 
-    def test_byteDataParamToInt(self):
-        test_data = [
-            (b'\x04\x05', 4005),
-            (b'\x04\x07', 4007),
-            (b'\x07\x01', 7001),
-            (b'\x04*', 4042),
-            (b'\x04\x0f', 4015),
-            (b'\x04\x10', 4016),
-            (b'\x04\x11', 4017),
-            (b'\x04\x12', 4018),
-            (b'\x04\x1e', 4030),
-            (b'\x04\x1f', 4031),
-            (b'\x04%', 4037),
-            (b'\x04\x0e', 4014),
-            (b'\x04\x1c', 4028),
-            (b'\x04\x14', 4020),
-            (b'\x04\x0c', 4012),
-            (b'\x04\x01', 4001),
-            (b'\x04\x02', 4002),
-            (b'"\x05', 34005),
-            (b'"\x1d', 34029),
-            (b'"\x08', 34008),
-            (b'"\x12', 34018),
-            (b'\x1a\x15', 26021),
-            (b'\x1a\x1c', 26028),
-            (b'\x1a\x1d', 26029),
-            (b'\x1a\x1e', 26030),
-            (b'\x1a\x1a', 26026),
-            (b'\x06\x01', 6001),
-            (b'\x08\x03', 8003),
-        ]
+    def test_as_repr(self):
+        assert protocol.as_repr(float) is Repr.FLOAT
+        assert protocol.as_repr(int) is Repr.WIDE_ENUM
+        assert protocol.as_repr(str) is Repr.STRING
+        assert protocol.as_repr(Repr.ENUM) is Repr.ENUM
+        assert protocol.as_repr(7) is Repr.ENUM
+        with pytest.raises(ProtocolError):
+            protocol.as_repr(bytes)
 
-        for test in test_data:
-            generatedDataParam = Watlow()._byteDataParamToInt(test[0])
-            assert generatedDataParam == test[1]
 
-    def test_buildWriteRequest(self):
-        '''
-        Tests that set requests are built properly based on the input dataParam
+class TestReplies:
 
-        _buildWriteRequest is also dependent on _headerCheckByte, _dataCheckByte
-        and _intDataParamToHex
+    @pytest.mark.parametrize('frame, address, param, value, repr_', [
+        # Actual responses received by the original author.
+        ('55FF06031100097702040803010F010047883B', 2, 8003, 71, Repr.WIDE_ENUM),  # write ack
+        ('55FF060011000AEE02040701010842A000001579', 2, 7001, 80.0, Repr.FLOAT),  # write ack
+        ('55ff06001f000a7702040701010842a20000adcc', 16, 7001, 81.0, Repr.FLOAT),  # write ack
+        ('55FF060011000B1002030104010108451E40B2F377', 2, 4001, 2532.04345703125, Repr.FLOAT),  # read
+        ('55ff060011000b100203010701010842960000d3b0', 2, 7001, 75.0, Repr.FLOAT),  # read
+        ('55FF060010000A760203010803010F010047C56B', 1, 8003, 71, Repr.WIDE_ENUM),  # read
+        ('55FF060011000AEE0203010425010F0105A90D37', 2, 4037, 1449, Repr.WIDE_ENUM),  # read
+    ])
+    def test_parse_reply(self, frame, address, param, value, repr_):
+        reply = protocol.parse_reply(unhexlify(frame), address)
+        assert reply.param == param
+        assert reply.instance == 1
+        assert reply.repr is repr_
+        assert reply.value == value
 
-        If the type of data is not provided, _buildWriteRequest() also relies on
-        read() and _parseResponse() to determine the data value type from a
-        read request
-        '''
-        test_data = [
-            # Test of form: dataParam, param value, value type, address, instance, request
-            (7001, 81, float, 1, '01', '55ff051000000aec01040701010842a20000c4b8'),
-            ('7001', 81, float, 1, '01', '55ff051000000aec01040701010842a20000c4b8'),
-            (7001, 80, float, 1, '01', '55ff051000000aec01040701010842a000007c0d'),
-            (7001, 78, float, 1, '01', '55ff051000000aec010407010108429c0000712e'),
-            (7001, 78.5, float, 1, '01', '55ff051000000aec010407010108429d0000ad74'),
-            (7001, 80, float, 2, '01', '55FF051100000A6501040701010842A000007C0D'),
-            (7001, 81, float, 16, '01', '55ff051f00000a1201040701010842a20000c4b8'),
-            (7001, 78.5, float, 16, '01', '55ff051f00000a12010407010108429d0000ad74'),
-            (8003, 71, int, 1, '01', '55FF05100300094601040803010F0100478FED'),
-            ('8003', 71, int, 1, '01', '55FF05100300094601040803010F0100478FED'),
-            (8003, 62, int, 1, '01', '55FF05100300094601040803010F01003EC903'),
-            (8003, 71, int, 2, '01', '55FF0511030009CF01040803010F0100478FED'),
-            (4005, 95, int, 2, '01', '55FF0511030009CF01040405010F01005F26D8'),  # Sensor Type
-            (4007, 1, int, 2, '01', '55FF0511030009CF01040407010F0100018B6B'),  # RTD Leads
-            (4042, 75, int, 2, '01', '55FF0511030009CF0104042A010F01004B6A36'),  # Units
-            (4015, 0.0, float, 2, '01', '55FF051100000A650104040F0108000000009B21'),  # Scale Low
-            (4016, 20.0, float, 2, '01', '55FF051100000A6501040410010841A000007D88'),  # Scale High
-            (4017, 0.0, float, 2, '01', '55FF051100000A65010404110108000000007312'),  # Range Low
-            (4018, 9999.0, float, 2, '01', '55FF051100000A65010404120108461C3C0004D8'),  # Range High
-            (4030, 62, int, 2, '01', '55FF0511030009CF0104041E010F01003E3CC5'),  # Process error enable
-            (4031, 0.0, float, 2, '01', '55FF051100000A650104041F0108000000005294'),  # Process error low value
-            (4037, 1449, int, 2, '01', '55FF0511030009CF01040425010F0105A947B1'),  # Resistance Range of thermistor
-            (4014, 0.5, float, 2, '01', '55FF051100000A650104040E01083F0000004540'),  # Filter
-            (4028, 62, int, 2, '01', '55FF0511030009CF0104041C010F01003E6ACD'),  # Input Error Latching
-            (4020, 105, int, 2, '01', '55FF0511030009CF01040414010F01006908CA'),  # Display precision
-            (4012, 0.0, float, 2, '01', '55FF051100000A650104040C010800000000F589'),  # Calibration offset
-            (34005, 62, int, 2, '01', '55FF0511030009CF01042205010F01003EE791'),  # Linearization function
-            (34029, 1539, int, 2, '01', '55FF0511030009CF0104221D010F010603B94C'),  # Linearization Units
-            (34008, 0.0, float, 2, '01', '55FF051100000A6501042208010800000000C24D'),  # Linearization input point 1
-            (34018, 0.0, float, 2, '01', '55FF051100000A65010422120108000000005C11'),  # Linearization output point 1
-            (26021, 62, int, 2, '01', '55FF0511030009CF01041A15010F01003EF1DB'),  # Process Value function
-            (26028, 1671, int, 2, '01', '55FF0511030009CF01041A1C010F0106871882'),  # Process Value Pressure Units
-            (26029, 1677, int, 2, '01', '55FF0511030009CF01041A1D010F01068D6929'),  # Altitude Units
-            (26030, 14.7, float, 2, '01', '55FF051100000A6501041A1E0108416B3333C7D9'),  # Barometric Pressure
-            (26026, 0.0, float, 2, '01', '55FF051100000A6501041A1A010800000000840F'),  # Filter
-            (6001, 68, int, 2, '01', '55FF0511030009CF01040601010F0100446351'),  # Digital I/O Direction
-        ]
+    def test_exception_replies(self):
+        # Original author: writing a read-only parameter
+        with pytest.raises(WatlowException) as e:
+            protocol.parse_reply(unhexlify('55FF0600110002170280FFB8'), 2)
+        assert e.value.code is ExceptionCode.UNSUPPORTED_FUNCTION
+        # PM4 refusing Ramp Action = 1647 (captured 2026-10-15)
+        with pytest.raises(WatlowException) as e:
+            protocol.parse_reply(unhexlify('55ff06001000028f0286c9dd'), 1)
+        assert e.value.code is ExceptionCode.DATA_OUT_OF_RANGE
+        assert 'DATA_OUT_OF_RANGE' in str(e.value)
 
-        for test in test_data:
-            setRequest = Watlow(serial=None, address=test[3])._buildWriteRequest(dataParam=test[0],
-                                                                                 value=test[1],
-                                                                                 data_type=test[2],
-                                                                                 instance=test[4])
-            assert setRequest == unhexlify(test[5]), "param: {0}, val: {1}, type: {2}, addr: {3}, instance: {4} request: {5}".format(*test)
+    def test_wrong_address(self):
+        with pytest.raises(InvalidResponse):
+            protocol.parse_reply(unhexlify('55FF06031100097702040803010F010047883B'), 1)
 
-    def test_validateResponse(self):
-        '''
-        Tests that the correct boolean is returned for each valid/invalid
-        response
-        '''
-        tests = [
-            # Actual Responses Received
-            # Tests in the form: (response, address, returned boolean)
-            ('55FF060010000B8802030104010108468F3638DD0E', 1, True),
-            ('55ff060010000b8802030104010108468f3abe4346', 1, True),
-            ('55FF060010000B8802030104010108468F3638DD0E', 1, True),
-            ('55ff060010000b8802030104010108468f3abe4346', 1, True),
-            ('55ff060011000b1002030104010108468f3c3c89b5', 1, False),  # Wrong address
-            ('55ff060011000b1002030104010108468f393a07ae', 1, False),  # Wrong address
-            ('55ff060010000b8802030104010108468f3abe4356', 1, False),  # Incorrect dataChk
-            ('55FF060010000B8902030104010108468F3638DD0E', 1, False),  # Incorrect headerChk
-            ('55FF060010000B8802030104010108468F3638DD0E', 2, False),  # Wrong address
-            ('55ff060010000b8802030104010108468f3abe4346', 2, False),  # Wrong address
-            ('55FF060010000B8802030104010108468F3638DD0E', 2, False),  # Wrong address
-            ('55ff060010000b8802030104010108468f3abe4346', 2, False),  # Wrong address
-            ('55ff060011000b1002030104010108468f3c3c89b5', 2, True),
-            ('55ff060011000b1002030104010108468f393a07ae', 2, True),
-            ('55ff060010000b8802030104010108468f3abe4356', 2, False),  # Incorrect dataChk
-            ('55FF060010000B8902030104010108468F3638DD0E', 2, False),  # Incorrect headerChk
-            ('55ff06001f000a7702040701010842a20000adcc', 16, True),  # Valid response to write request
-            ('55ff06001f000b8902030107010108429d00007599', 16, True),  # Valid response to read request
-        ]
+    def test_bad_checks(self):
+        with pytest.raises(InvalidResponse):  # data check
+            protocol.parse_reply(unhexlify('55ff060010000b8802030104010108468f3abe4356'), 1)
+        with pytest.raises(InvalidResponse):  # header check
+            protocol.parse_reply(unhexlify('55FF060010000B8902030104010108468F3638DD0E'), 1)
+        with pytest.raises(InvalidResponse):  # preamble
+            protocol.parse_reply(unhexlify('56FF060010000B8802030104010108468F3638DD0E'), 1)
 
-        for test in tests:
-            validateResponse = Watlow(serial=None, address=test[1])._validateResponse(unhexlify(test[0]))
-            assert validateResponse == test[2], 'msg: {0}, addr: {1}, bool: {2}'.format(*test)
+    def test_truncated(self):
+        with pytest.raises(ProtocolError):
+            protocol.parse_reply(unhexlify('55FF060010000B8802030104010108468F36'), 1)
+        with pytest.raises(ProtocolError):
+            protocol.parse_frame(b'\x55\xff\x06')
 
-    def test_parseResponse(self):
-        '''
-        Tests that the correct data, param, address, and error is being extracted
-        from each type of response
+    def test_request_is_not_a_reply(self):
+        with pytest.raises(InvalidResponse):
+            protocol.parse_reply(unhexlify('55ff0510000006e8010301040101e399'), 1)
 
-        Also dependent on _validateResponse
-        '''
+    def test_frame_address(self):
+        frame = protocol.parse_frame(unhexlify('55ff0510000006e8010301040101e399'))
+        assert frame.frame_type == protocol.FRAME_TYPE_REQUEST
+        assert frame.address == 1
+        frame = protocol.parse_frame(unhexlify('55ff06001f000a7702040701010842a20000adcc'))
+        assert frame.frame_type == protocol.FRAME_TYPE_REPLY
+        assert frame.address == 16
 
-        tests = [
-            # Actual responses received
-            # Tests in the form: (response, param, address, data, error)
-            ('55FF06031100097702040803010F010047883B', 8003, 2, 71, False),
-            ('55FF06031100097702040803010F010047883B', None, 1, None, True),  # Param: 8003, error from wrong address
-            ('55FF060011000AEE02040701010842A000001579', 7001, 2, 80.0, False),
-            ('55ff06001f000a7702040701010842a20000adcc', 7001, 16, 81.0, False),
-            ('55FF060011000B1002030104010108451E40B2F377', 4001, 2, 2532.04345703125, False),
-            ('55FF0600110002170280FFB8', None, 2, None, True)  # Param: 4001, error from trying to write to read-only param
-        ]
+    def test_decode_value_all_representations(self):
+        assert protocol.decode_value(b'\x01\xc8') == (Repr.UBYTE, 200, 2)
+        assert protocol.decode_value(b'\x02\xfe') == (Repr.BYTE, -2, 2)
+        assert protocol.decode_value(b'\x03\x12\x34') == (Repr.UWORD, 0x1234, 3)
+        assert protocol.decode_value(b'\x04\xff\xff') == (Repr.WORD, -1, 3)
+        assert protocol.decode_value(b'\x05\x01\x02\x03\x04') == (Repr.ULONG, 0x01020304, 5)
+        assert protocol.decode_value(b'\x06\xff\xff\xff\xfe') == (Repr.LONG, -2, 5)
+        assert protocol.decode_value(b'\x08\x43\xaf\x00\x00') == (Repr.FLOAT, 350.0, 5)
+        assert protocol.decode_value(b'\x07\x01\x47') == (Repr.ENUM, 71, 3)
+        assert protocol.decode_value(b'\x07\x02\x47\x3e') == (Repr.ENUM, (71, 62), 4)
+        assert protocol.decode_value(b'\x0f\x01\x06\x6f') == (Repr.WIDE_ENUM, 1647, 4)
+        assert protocol.decode_value(b'\x0f\x02\x00\x3e\x00\x58') == (Repr.WIDE_ENUM, (62, 88), 6)
+        assert protocol.decode_value(b'\x0a\x01\x01\x2c') == (Repr.LIST, 300, 4)
+        # String count includes the trailing NUL (GetListLength case 9)
+        assert protocol.decode_value(b'\x09\x03AB\x00') == (Repr.STRING, 'AB', 5)
 
-        for test in tests:
-            generatedOutput = Watlow(serial=None, address=test[2])._parseResponse(unhexlify(test[0]))
-            test_msg = 'msg: {0}, param: {1}, addr: {2}, data: {3}, isError: {4}'.format(*test)
-            assert generatedOutput['data'] == test[3], test_msg
-            assert generatedOutput['param'] == test[1], test_msg
-            assert generatedOutput['address'] == test[2], test_msg
-            assert (type(generatedOutput['error']) is Exception) == test[4], test_msg
+    def test_decode_value_errors(self):
+        with pytest.raises(ProtocolError):
+            protocol.decode_value(b'')
+        with pytest.raises(ProtocolError):
+            protocol.decode_value(b'\x08\x43\xaf')
+        with pytest.raises(ProtocolError):
+            protocol.decode_value(b'\x0f\x02\x00\x3e')
+        with pytest.raises(ProtocolError):
+            protocol.decode_value(b'\x0b')
+        with pytest.raises(ProtocolError):
+            protocol.decode_value(b'\x63\x00')
+
+
+class FakeSerial:
+    '''
+    A serial port that answers each write with the next queued frame.
+    '''
+    port = 'FAKE'
+
+    def __init__(self, *replies):
+        self.replies = [unhexlify(r) if isinstance(r, str) else r for r in replies]
+        self.writes = []
+        self.pending = b''
+
+    def reset_input_buffer(self):
+        self.pending = b''
+
+    def write(self, data):
+        self.writes.append(bytes(data))
+        self.pending = self.replies.pop(0) if self.replies else b''
+
+    def read(self, n):
+        out, self.pending = self.pending[:n], self.pending[n:]
+        return out
+
+
+class TestWatlow:
+
+    def test_read(self):
+        port = FakeSerial('55FF060011000B1002030104010108451E40B2F377')
+        result = Watlow(serial=port, address=2).read()
+        assert port.writes == [unhexlify('55ff051100000661010301040101e399')]
+        assert result == {'address': 2, 'param': 4001, 'data': 2532.04345703125,
+                          'repr': Repr.FLOAT, 'error': None}
+
+    def test_read_ignores_legacy_data_type(self):
+        port = FakeSerial('55FF060011000B1002030104010108451E40B2F377')
+        result = Watlow(serial=port, address=2).readParam(4001, int)
+        assert result['data'] == 2532.04345703125
+
+    def test_write_setpoint(self):
+        port = FakeSerial('55FF060011000AEE02040701010842A000001579')
+        result = Watlow(serial=port, address=2).write(80)
+        assert port.writes == [unhexlify('55FF051100000A6501040701010842A000007C0D')]
+        assert result['param'] == 7001
+        assert result['data'] == 80.0
+        assert result['error'] is None
+
+    def test_write_enum_with_explicit_type(self):
+        # Ack carries the reply-style entry count; request carries the byte length.
+        port = FakeSerial('55FF06031100097702040803010F010047883B')
+        result = Watlow(serial=port, address=2).writeParam(8003, 71, int)
+        assert port.writes[0][8:-2] == unhexlify('01040803010f020047')
+        assert result['data'] == 71
+        assert result['repr'] is Repr.WIDE_ENUM
+        assert result['error'] is None
+
+    def test_write_discovers_type_by_reading_first(self):
+        # Read reply says 8003 is a wide enum holding 62; then the write ack.
+        read_reply = protocol.build_frame(
+            2, unhexlify('02030108030' + '10f01003e'), protocol.FRAME_TYPE_REPLY, src=0x11)
+        port = FakeSerial(read_reply, '55FF06031100097702040803010F010047883B')
+        result = Watlow(serial=port, address=2).writeParam(8003, 71)
+        assert len(port.writes) == 2
+        assert port.writes[0][8:-2] == unhexlify('010301080301')
+        assert port.writes[1][8:-2] == unhexlify('01040803010f020047')
+        assert result['data'] == 71
+
+    def test_write_discovery_failure_is_reported(self):
+        port = FakeSerial(b'')
+        result = Watlow(serial=port, address=2).writeParam(8003, 71)
+        assert isinstance(result['error'], NoResponse)
+        assert len(port.writes) == 1
+
+    def test_controller_exception(self):
+        port = FakeSerial('55ff06001000028f0286c9dd')
+        result = Watlow(serial=port, address=1).writeParam(7014, 1647, int)
+        assert result['data'] is None
+        assert isinstance(result['error'], WatlowException)
+        assert result['error'].code is ExceptionCode.DATA_OUT_OF_RANGE
+
+    def test_no_response(self):
+        port = FakeSerial(b'')
+        result = Watlow(serial=port, address=2).read()
+        assert result == {'address': 2, 'param': 4001, 'data': None, 'repr': None,
+                          'error': result['error']}
+        assert isinstance(result['error'], NoResponse)
+
+    def test_truncated_response(self):
+        port = FakeSerial('55FF060011000B1002030104010108451E')
+        result = Watlow(serial=port, address=2).read()
+        assert isinstance(result['error'], InvalidResponse)
+
+    def test_reply_from_wrong_address(self):
+        port = FakeSerial('55FF060011000B1002030104010108451E40B2F377')
+        result = Watlow(serial=port, address=1).read()
+        assert isinstance(result['error'], InvalidResponse)
+
+    def test_bad_data_type(self):
+        port = FakeSerial()
+        result = Watlow(serial=port, address=1).writeParam(7001, 1, bytes)
+        assert isinstance(result['error'], ProtocolError)
+        assert port.writes == []
+
+    def test_value_out_of_range_for_type(self):
+        port = FakeSerial()
+        result = Watlow(serial=port, address=1).writeParam(7014, 70000, int)
+        assert isinstance(result['error'], ProtocolError)
+        assert port.writes == []
+
+    def test_frame_read_is_length_driven(self):
+        # A 12-byte exception followed by an unrelated frame: only the first is consumed.
+        port = FakeSerial(unhexlify('55ff06001000028f0286c9dd') + b'\x55\xff\x06')
+        result = Watlow(serial=port, address=1).read()
+        assert isinstance(result['error'], WatlowException)
+        assert port.pending == b'\x55\xff\x06'

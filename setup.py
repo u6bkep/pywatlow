@@ -25,9 +25,9 @@ def read(*names, **kwargs):
 
 setup(
     name='pywatlow',
-    version='0.1.4',
+    version='0.2.0',
     license='LGPL-3.0-only',
-    description='A Python driver for the Watlow EZ-Zone PM3 temperature controller standard bus protocol',
+    description='A Python driver for the Watlow EZ-ZONE temperature controller standard bus protocol',
     long_description='%s\n%s' % (
         re.compile('^.. start-badges.*^.. end-badges', re.M | re.S).sub('', read('README.rst')),
         re.sub(':[a-z]+:`~?(.*?)`', r'``\1``', read('CHANGELOG.rst'))
@@ -47,10 +47,12 @@ setup(
         'License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)',
         'Operating System :: Microsoft :: Windows',
         'Programming Language :: Python',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
         # uncomment if you test on these interpreters:
         # 'Programming Language :: Python :: Implementation :: IronPython',
         # 'Programming Language :: Python :: Implementation :: Jython',
@@ -65,10 +67,10 @@ setup(
     keywords=[
         # eg: 'keyword1', 'keyword2', 'keyword3',
     ],
-    python_requires='>=3.5',
+    python_requires='>=3.7',
     install_requires=[
         # eg: 'aspectlib==1.1.1', 'six>=1.7',
-        'pyserial>=3.4', 'crcmod>=1.7',
+        'pyserial>=3.4',
     ],
     extras_require={
         # eg:
